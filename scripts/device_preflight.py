@@ -21,7 +21,6 @@ import subprocess
 import sys
 import tempfile
 from typing import Any, Iterable
-import zlib
 
 from bitwig_nitro import decompile_nitrobin, serialize_nitrobin
 
@@ -751,7 +750,7 @@ def inspect_control_contract(document: dict[str, Any], contract: Any) -> list[Fi
     try:
         if not isinstance(contract, dict) or contract.get("schema") != 1:
             raise ValueError("expected control contract schema 1")
-        if contract.get("shaderRole") not in {"backdrop-and-trigger-flash", "non-interactive-display"}:
+        if contract.get("shaderRole") not in ("backdrop-and-trigger-flash", "non-interactive-display"):
             raise ValueError("v1 requires decorative or display-only shaders with native controls")
         controls = contract["controls"]
         if not isinstance(controls, list) or not controls:
@@ -867,30 +866,39 @@ def inspect_event_instrument_route(document: dict[str, Any], core: dict[str, Any
     """Check the locally authored NoteEvent -> Nitro -> stereo root route."""
     findings: list[Finding] = []
     objects = list(owned_objects(document["body"]))
-    def source(entry: dict) -> dict:
+    def source(entry: dict) -> tuple[dict, int]:
         try:
-            connection = resolve_object(entry, objects)
-            return resolve_object(field_by_suffix(connection, "source_component#248"), objects)
+            return connection_source(resolve_object(entry, objects), objects)
         except PreflightError:
-            return {}
+            return {}, -1
     try:
         body_type = field_by_suffix(document["body"], "device_type#391")["value"]
         metadata_type = document["metadata"]["fields"]["device_type"]["value"]
         proxies = field_by_suffix(document["body"], "proxy_in_ports#177")["value"]
         proxy_classes = [resolve_object(field_by_suffix(resolve_object(entry, objects), "port#301"), objects).get("class_id") for entry in proxies]
-        output = resolve_object(field_by_suffix(document["body"], "proxy_out_ports#178")["value"][0], objects)
+        root_outputs = field_by_suffix(document["body"], "proxy_out_ports#178")["value"]
+        output = resolve_object(root_outputs[0], objects)
         output_connections = field_by_suffix(resolve_object(field_by_suffix(output, "settings#6194"), objects), "inport_connections#614")["value"]
         input_info = inputs[0]["Object"]["fields"]
         output_info = outputs[0]["Object"]["fields"]
         event_ok = (input_info["name#8557"]["value"] == "note_in" and input_info["kind#8561"]["value"] == 2
                     and input_info["event_size#8565"]["value"] == 44 and input_info["event_type#8566"]["value"] == "NoteEvent")
         stereo_ok = output_info["kind#8561"]["value"] == 1 and output_info["channel_count#8559"]["value"] == 2
-        route_ok = (len(connections) == len(inputs) and len(output_connections) == 1
-                    and source(connections[0]) is resolve_object(proxies[1], objects)
-                    and source(output_connections[0]) is core)
+        drawing_only = len(outputs) <= 3 and all(
+            field_by_suffix(item["Object"], "kind#8561").get("value") == 1
+            and field_by_suffix(item["Object"], "channel_count#8559").get("value") == 4
+            for item in outputs[1:]
+        )
+        note_source, note_index = source(connections[0])
+        audio_source, audio_index = source(output_connections[0])
+        output_class = resolve_object(field_by_suffix(output, "port#301"), objects).get("class_id")
+        route_ok = (len(connections) == len(inputs) and len(root_outputs) == 1 and len(output_connections) == 1
+                    and note_source is resolve_object(proxies[1], objects) and note_index == 0
+                    and output.get("class_id") == 50 and output_class == 242
+                    and audio_source is core and audio_index == 0)
         if not (body_type == 2 and metadata_type == "note_to_audio" and proxy_classes == [242, 61]
-                and len(outputs) == 1 and event_ok and stereo_ok and route_ok):
-            findings.append(Finding("error", "ABI028", "Original instrument NoteEvent input, stereo output, or root proxy route is incomplete.", "artifact"))
+                and event_ok and stereo_ok and drawing_only and route_ok):
+            findings.append(Finding("error", "ABI028", "Event instrument requires a NoteEvent input and only stereo core output 0 at the root audio proxy. Any auxiliary outputs must be four-lane drawing vectors.", "artifact"))
     except (PreflightError, KeyError, IndexError, TypeError):
         findings.append(Finding("error", "ABI028", "Original instrument route is missing required fields.", "artifact"))
     return findings
@@ -1246,8 +1254,7 @@ def inspect_event_parameter_writer(
 def inspect_note_input_precision(binary: bytes, inputs: list[Any], label: str) -> list[Finding]:
     """Compare persisted audio input precision against the compiled Nitro declarations."""
     try:
-        ast_bytes = zlib.decompress(binary, -15) if binary and binary[0] not in (0x09, 0x0A) else binary
-        declarations = decompile_nitrobin(ast_bytes).children[0]
+        declarations = decompile_nitrobin(binary).children[0]
         component = next(item for item in declarations if getattr(item, "kind", None) == "ComponentDeclaration")
         ports = [item for item in component.children[1] if getattr(item, "kind", None) == "PortDeclaration"
                  and item.children[0].kind.startswith("Input")]
@@ -1316,7 +1323,8 @@ def inspect_parameter_ports(objects: list[dict[str, Any]]) -> list[Finding]:
 
 
 def inspect_document(
-    document: dict[str, Any], config: dict[str, Any], compiled_sources: list[bytes]
+    document: dict[str, Any], config: dict[str, Any], compiled_sources: list[bytes],
+    *, compiler_profile: dict[str, Any] | None = None,
 ) -> tuple[list[Finding], list[Finding], list[str]]:
     findings: list[Finding] = []
     note_profile = config.get("profile") in (NOTE_PROFILE, NOTE_613_PROFILE)
@@ -1365,7 +1373,9 @@ def inspect_document(
         if expected_inputs is not None and len(inputs) != expected_inputs:
             findings.append(Finding("error", "ABI002", f"{label}: expected {expected_inputs} Nitro inputs, found {len(inputs)}.", "artifact", None))
         if note_profile and source_binary is not None:
-            findings.extend(inspect_note_input_precision(source_binary, inputs, label))
+            from compiler_profiles import unpack_ast
+            ast = unpack_ast(source_binary, compiler_profile or {})
+            findings.extend(inspect_note_input_precision(ast, inputs, label))
         if expected_outputs is not None and len(outputs) != expected_outputs:
             findings.append(Finding("error", "ABI003", f"{label}: expected {expected_outputs} Nitro outputs, found {len(outputs)}.", "artifact", None))
         audio_outputs = [p for p in outputs if field_by_suffix(p.get("Object", {}), "kind#8561").get("value") == 1] if expected_audio_outputs is not None else []
@@ -1769,6 +1779,32 @@ def has_passive_display_lines(item: dict[str, Any], objects: list[dict[str, Any]
     return True
 
 
+def is_display_handle(item: dict[str, Any], objects: list[dict[str, Any]]) -> bool:
+    """Recognize parameter-backed drag targets positioned by their parent plot."""
+    class_id = item.get("class_id")
+    if class_id not in (1806, 1807):
+        return False
+    fields = item.get("fields", {})
+    layout = resolve_object(fields.get("layout_settings#6226", {}), objects)
+    if (layout.get("class_id") != 1803 or fields.get("items#6221")
+            or fields.get("is_interactive#6499", {}).get("value") is not True):
+        return False
+    if class_id == 1807:
+        return resolve_object(fields.get("component#6503", {}), objects).get("class_id") == 289
+    axes = [fields.get(f"component_{axis}#{number}", {}) for axis, number in (("x", 6512), ("y", 6513))]
+    targets = [resolve_object(axis, objects).get("class_id") for axis in axes]
+    return 289 in targets and all(axis.get("type") == "NullObject" or target == 289
+                                  for axis, target in zip(axes, targets))
+
+
+def clickable_stack_label(item: dict[str, Any], objects: list[dict[str, Any]]) -> dict[str, Any]:
+    """A passive label can supply the bounds of a clickable stack."""
+    if item.get("class_id") != 1683:
+        return {}
+    layout = resolve_object(field_by_suffix(item, "layout_settings#6226"), objects)
+    return layout if layout.get("class_id") == 1803 else {}
+
+
 def inspect_panel_heights(document: dict[str, Any]) -> list[Finding]:
     """Validate the built chain panels, including nested fixed-grid bounds.
 
@@ -1817,6 +1853,12 @@ def inspect_panel_heights(document: dict[str, Any]) -> list[Finding]:
             child_path = f"{path}/items[{index}]"
             if target is None:
                 error("PANEL004", child_path, "Panel item cannot be resolved.")
+            elif item.get("class_id") == 1804 and is_display_handle(target, objects):
+                continue
+            elif item.get("class_id") == 3405 and (stack := clickable_stack_label(target, objects)):
+                rows = field_by_suffix(stack, "height#6218").get("value")
+                if type(rows) is not int or not 0 < rows <= height:
+                    error("PANEL003", child_path, f"Stack label height {rows!r} exceeds its parent height {height} or is invalid.")
             else:
                 visit(target, height, child_path, ancestors)
 
@@ -2055,12 +2097,18 @@ def inspect_panel_overlaps(document: dict[str, Any]) -> list[Finding]:
             children = field(item, "items#6221", []) or []
             container = item.get("class_id") in (1681, 3405) or bool(children)
             interactive = any(field(item, suffix, "") for suffix in ("click_action#10185", "doubleclick_action#10186"))
+            if not has_passive_display_lines(item, objects):
+                for i, child in enumerate(children):
+                    target = resolve(child)
+                    if target is not None and item.get("class_id") == 1804 and is_display_handle(target, objects):
+                        interactive = True
+                        continue
+                    if target is not None and item.get("class_id") == 3405 and clickable_stack_label(target, objects):
+                        continue
+                    visit(target, x, y, f"{item_path}/items[{i}]", ancestors | {id(item)}, conditions)
             if bounds and item.get("class_id") != 5517 and (not container or interactive):
                 name = next((field(item, suffix) for suffix in ("text#6219", "tooltip_text#6867", "title#6241") if field(item, suffix)), f"class {item.get('class_id')}")
                 rectangles.append((item_path, str(name), bounds, ancestors, conditions))
-            if not has_passive_display_lines(item, objects):
-                for i, child in enumerate(children):
-                    visit(resolve(child), x, y, f"{item_path}/items[{i}]", ancestors | {id(item)}, conditions)
             item_ids[item_path] = id(item)
 
         item_ids: dict[str, int] = {}
@@ -2107,12 +2155,13 @@ def multi_core_findings(paths: list[Path], project_file: Path) -> list[Finding]:
 
 def semantic_check(
     paths: list[Path], compiler_inputs: dict[str, Any], scratch: Path, *, verify_llvm: bool = False,
+    llvm_output: Path | None = None,
 ) -> tuple[Check, list[Finding]]:
     """Run Bitwig's own Nitro semantic analysis on each source, one at a time.
 
     The parser stage proves syntax only. This stage catches undeclared names,
-    missing members and type errors. The exact Windows 6.1.3 path also
-    verifies the emitted LLVM IR. Analysis stays serial (see NITRO024).
+    missing members and type errors. The supported Windows profiles can also
+    verify the emitted LLVM IR. Analysis stays serial (see NITRO024).
     """
     name = "Exact-version Nitro semantic analysis"
     if verify_llvm:
@@ -2128,6 +2177,9 @@ def semantic_check(
         severity, rule, status = ("error", "NITRO029", "fail") if verify_llvm else ("warning", "NITRO026", "skip")
         return Check(name, status, detail), [Finding(severity, rule, detail, "toolchain", None)]
 
+    if compiler_inputs["profileId"] not in ("windows-x86_64-bitwig-6.1.3", "windows-x86_64-bitwig-6.1.7"):
+        return unavailable(f"no semantic probe for {compiler_inputs['profileId']}")
+
     javac = shutil.which(compiler_inputs.get("javac") or "javac")
     if javac is None:
         return unavailable("javac is unavailable, so the semantic probe could not be compiled")
@@ -2136,10 +2188,13 @@ def semantic_check(
     findings = []
     verified = 0
     with tempfile.TemporaryDirectory(prefix="nitro-semantic-", dir=scratch) as classes:
+        ir_directory = llvm_output if llvm_output is not None else Path(classes)
         classpath = os.pathsep.join((classes, compiler_inputs["jar"], compiler_inputs["libs"]))
         properties = [f"-DinstallationRoot={install}"]
+        if compiler_inputs.get("profileId") == "windows-x86_64-bitwig-6.1.7":
+            properties.append("-Dnitro.frontend=windows-6.1.7")
         if verify_llvm:
-            properties.append(f"-Dnitro.llvm.output={classes}")
+            properties.append(f"-Dnitro.llvm.output={ir_directory}")
         try:
             run([javac, "--release", "17", "-d", classes, str(source)], timeout=60)
             output = run([compiler_inputs["java"], *properties, "-cp", classpath,
@@ -2152,7 +2207,7 @@ def semantic_check(
                 if fields[0] != "OK":
                     continue
                 try:
-                    ir = (Path(classes) / f"{index}.ll").read_text(encoding="utf-8")
+                    ir = (ir_directory / f"{index}.ll").read_text(encoding="utf-8")
                     with llvm.parse_assembly(ir) as module:
                         if not any(not function.is_declaration for function in module.functions):
                             raise ValueError("LLVM module contains no function definitions")
@@ -2311,6 +2366,7 @@ def preflight(workspace: Path, report_path: Path | None = None, *, compiler_inpu
     findings: list[Finding] = validate_profile_config(config, str(project_file))
     checks.append(Check("Version-bound profile", "pass" if not findings else "fail", f"{len(findings)} finding(s)"))
     compiler = None
+    compiler_profile = None
     document_parser = DEFAULT_PARSER
     if config["profile"] in (EFFECT_613_PROFILE, NOTE_613_PROFILE, INSTRUMENT_EVENT_613_PROFILE,
                              INSTRUMENT_NATIVE_VOICE_613_PROFILE):
@@ -2351,6 +2407,8 @@ def preflight(workspace: Path, report_path: Path | None = None, *, compiler_inpu
     checks.append(Check("Nitro source lint", "fail" if source_errors else "warning" if source_findings else "pass", f"{len(nitro_paths)} source file(s), {len(source_findings)} finding(s)"))
 
     output_root = ROOT / "build/preflight" / re.sub(r"[^A-Za-z0-9_.-]+", "-", project["projectId"])
+    if project_file.name != "bitwig-project.json":
+        output_root /= project_file.stem.removeprefix("bitwig-project.")
     output_root.mkdir(parents=True, exist_ok=True)
     compiled: list[bytes] = []
     if not any(item.severity == "error" for item in findings):
@@ -2365,7 +2423,7 @@ def preflight(workspace: Path, report_path: Path | None = None, *, compiler_inpu
         if compiler:
             semantic, semantic_findings = semantic_check(
                 nitro_paths, compiler_config, output_root,
-                verify_llvm=compiler_config["profileId"] == "windows-x86_64-bitwig-6.1.3",
+                verify_llvm=compiler_config["profileId"] in ("windows-x86_64-bitwig-6.1.3", "windows-x86_64-bitwig-6.1.7"),
             )
             checks.append(semantic)
             findings.extend(semantic_findings)
@@ -2427,7 +2485,9 @@ def preflight(workspace: Path, report_path: Path | None = None, *, compiler_inpu
             findings.extend(extra)
             status = "fail" if any(f.severity == "error" for f in extra) else "warning" if extra else "pass"
             checks.append(Check(name, status, f"{len(extra)} finding(s); does not prove mouse interaction"))
-        graph_findings, shader_findings, shaders = inspect_document(parsed, config, compiled)
+        graph_findings, shader_findings, shaders = inspect_document(
+            parsed, config, compiled, compiler_profile=compiler_profile,
+        )
         findings.extend(graph_findings)
         findings.extend(shader_findings)
         checks.append(Check("Graph, port and shell ABI", "pass" if not graph_findings else "fail", f"{len(graph_findings)} finding(s)"))
@@ -2439,7 +2499,7 @@ def preflight(workspace: Path, report_path: Path | None = None, *, compiler_inpu
         checks.append(Check(
             "Host-regression document lints",
             "fail" if any(item.severity == "error" for item in common) else "warning" if common else "pass",
-            f"{len(common)} finding(s); type version range, child scheduling, Nitro and drawing port widths",
+            f"{len(common)} finding(s); document version, graph, ports and panel contracts",
         ))
         if shaders:
             shader_results = [skia_check(shader) for shader in shaders]

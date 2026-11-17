@@ -1,7 +1,8 @@
 # Build and preflight
 
-The reference procedure targets Windows x64 (`windows-x86_64-bitwig-6.1.3`),
-with a Linux x64 profile (`linux-x86_64-bitwig-6.1.7`) also provided. Use
+Blueprint Gain has build targets for Windows x64 on Bitwig 6.1.3 and 6.1.7,
+and for Linux x64 on 6.1.7. See [host evidence](BITWIG-TEST.md#current-evidence)
+for validation by target. Use
 Python 3.12 x64 (`python3.12 -m venv` or `uv`), a Rust 1.85+ toolchain with
 Cargo (`edition = "2024"`), and a JDK with `javac` (17+) on PATH. The setup
 downloads Python and Rust dependencies on first use. Once those are installed,
@@ -32,8 +33,8 @@ BITWIG=/opt/bitwig-studio
 
 ### Windows (PowerShell)
 
-From the repository root in PowerShell, adjust `$bitwig` to your own 6.1.3
-installation path.
+From the repository root in PowerShell, set `$version` and `$bitwig` to your
+matching Bitwig installation.
 
 ```powershell
 uv venv --seed --python 3.12 .venv
@@ -42,9 +43,10 @@ $python = '.\.venv\Scripts\python.exe'
 & $python -m pip install --no-deps -e tools/nitro_ast
 if ($LASTEXITCODE -ne 0) { throw 'Nitro AST installation failed' }
 .\scripts\setup-preflight.ps1
+$version = '6.1.7'  # Use '6.1.3' with that exact installation.
 $bitwig = 'C:\Program Files\Bitwig Studio'
 & $python scripts/build-local-host-tools.py `
-  --profile-id windows-x86_64-bitwig-6.1.3 `
+  --profile-id "windows-x86_64-bitwig-$version" `
   --jar (Join-Path $bitwig 'bin\bitwig.jar') `
   --libs (Join-Path $bitwig 'bin\libs.jar') `
   --java (Join-Path $bitwig 'jre\bin\java.exe') `
@@ -66,13 +68,13 @@ INPUTS=local/host-tools/linux-x86_64-bitwig-6.1.7/compiler-inputs.json
 DEMO=devices/blueprint-gain
 PROJECT="$DEMO/bitwig-project.linux-6.1.7.json"
 
-"$PYTHON" scripts/device_preflight.py "$DEMO" --project-file "$PROJECT" --compiler-inputs "$INPUTS"
-"$PYTHON" "$DEMO/build.py" --project-file "$PROJECT" --compiler-inputs "$INPUTS"
+"$PYTHON" scripts/device_preflight.py "$DEMO" --project-file "$PROJECT" --compiler-inputs "$INPUTS" || exit 1
+"$PYTHON" "$DEMO/build.py" --project-file "$PROJECT" --compiler-inputs "$INPUTS" || exit 1
 "$PYTHON" - <<'PY'
 import hashlib, json
 from pathlib import Path
 
-report = json.loads(Path("build/preflight/polarity.blueprint-gain/report.json").read_text())
+report = json.loads(Path("build/preflight/polarity.blueprint-gain/linux-6.1.7/report.json").read_text())
 artifact = Path("devices/blueprint-gain/build/linux-6.1.7/Blueprint Gain.bwdevice")
 digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
 if report["status"] != "pass" or digest != report["artifactSha256"]:
@@ -85,14 +87,21 @@ PY
 
 ```powershell
 $python = '.\.venv\Scripts\python.exe'
-$inputs = 'local/host-tools/windows-x86_64-bitwig-6.1.3/compiler-inputs.json'
+$version = '6.1.7'  # Match the version used in setup.
+$inputs = "local/host-tools/windows-x86_64-bitwig-$version/compiler-inputs.json"
 $demo = 'devices/blueprint-gain'
-& $python scripts/device_preflight.py $demo --compiler-inputs $inputs
+$targetArgs = @('--compiler-inputs', $inputs)
+$reportPath = 'build/preflight/polarity.blueprint-gain'
+if ($version -eq '6.1.7') {
+    $targetArgs += @('--project-file', "$demo/bitwig-project.windows-6.1.7.json")
+    $reportPath += '/windows-6.1.7'
+}
+& $python scripts/device_preflight.py $demo @targetArgs
 if ($LASTEXITCODE -ne 0) { throw 'Preflight failed' }
-& $python "$demo/build.py" --compiler-inputs $inputs
+& $python "$demo/build.py" @targetArgs
 if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
-$report = Get-Content build/preflight/polarity.blueprint-gain/report.json -Raw | ConvertFrom-Json
-$artifact = "$demo/build/windows-6.1.3/Blueprint Gain.bwdevice"
+$report = Get-Content "$reportPath/report.json" -Raw | ConvertFrom-Json
+$artifact = "$demo/build/windows-$version/Blueprint Gain.bwdevice"
 if ($report.status -ne 'pass' -or (Get-FileHash -Algorithm SHA256 -LiteralPath $artifact).Hash -ne $report.artifactSha256) {
     throw 'Built file does not match the passing preflight'
 }
@@ -100,10 +109,14 @@ if ($report.status -ne 'pass' -or (Get-FileHash -Algorithm SHA256 -LiteralPath $
 
 Start with the first failed check or rule ID in the JSON report. Profiles
 check the exact compiler inputs, Nitro syntax, semantic analysis and LLVM IR
-(pinned to the Windows 6.1.3 front-end entry points; other profiles skip this
-step with warning `NITRO026`), two clean builds, byte-stable document
+on Windows 6.1.3 and 6.1.7 (other platforms skip the semantic probe with
+`NITRO026`), two clean builds, byte-stable document
 roundtrips, graph and panel contracts, and embedded SkSL compilation in local
 Skia.
+
+The 6.1.7 compiler emits raw DEFLATE Nitro payloads. Analyze the unpacked AST,
+and embed the compiler's original payload in the output. Match the build to
+the target version when preparing a Patchbay folder.
 
 `PASS (ready-for-controlled-host-test)` means the artifact is ready for the
 [Bitwig test](BITWIG-TEST.md). Native JIT, browser insertion, real audio,

@@ -8,11 +8,12 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 
 /**
- * Runs the pinned Bitwig 6.1.3 Nitro front end, including semantic analysis,
+ * Runs a pinned Bitwig Nitro front end, including semantic analysis,
  * on plain-text sources without launching the application.
  *
  * Usage: java -DinstallationRoot=<Bitwig dir> -cp <probe>:<bitwig.jar>:<libs.jar>
- *        [-Dnitro.llvm.output=<temporary directory>] NitroSemanticProbe <source.nitro>...
+ *        [-Dnitro.llvm.output=<temporary directory>] [-Dnitro.sampleRate=44100]
+ *        [-Dnitro.blockSize=1] [-Dnitro.frontend=windows-6.1.7] NitroSemanticProbe <source.nitro>...
  *
  * Every source is analysed on its own, one after another. Bitwig analyses the
  * cores of a device in parallel, and a cold parallel analysis can fail with
@@ -24,15 +25,23 @@ import java.util.ArrayList;
  */
 public class NitroSemanticProbe {
     public static void main(String[] args) throws Exception {
-        Class<?> flags = Class.forName("com.bitwig.nitro.Xf");
+        String frontend = System.getProperty("nitro.frontend", "windows-6.1.3");
+        boolean current = switch (frontend) {
+            case "windows-6.1.3" -> false;
+            case "windows-6.1.7" -> true;
+            default -> throw new IllegalArgumentException("Unknown Nitro semantic frontend: " + frontend);
+        };
+        Class<?> flags = Class.forName(current ? "com.bitwig.nitro.blr" : "com.bitwig.nitro.Xf");
         Object noFlags = flags.getConstructors()[0].newInstance(
             false, false, false, false, false, false, false, false, false, false, false, false);
         // Compiler settings: revision, chunk size, block size, sample rate,
         // oversampling factor, FFT order, ..., zero-init, absolute paths, flags.
         // A 1024-frame chunk turned audio ports into f32<1024> and rejected the
         // host-accepted Growl and Normalizer sources; 32 accepts them.
-        Object settings = Class.forName("com.bitwig.nitro.EWg").getConstructors()[0]
-            .newInstance(0, 32, 1, 44100, 1.0, 0, 0, false, false, noFlags);
+        int blockSize = Integer.getInteger("nitro.blockSize", 1);
+        int sampleRate = Integer.getInteger("nitro.sampleRate", 44100);
+        Object settings = Class.forName(current ? "com.bitwig.nitro.Hvv" : "com.bitwig.nitro.EWg").getConstructors()[0]
+            .newInstance(0, 32, blockSize, sampleRate, 1.0, 0, 0, false, false, noFlags);
 
         // Plain-text code source of a Nitro atom. Its outer atom is only used
         // for identity, so an unconstructed instance is sufficient.
@@ -40,17 +49,18 @@ public class NitroSemanticProbe {
         unsafeField.setAccessible(true);
         Object unsafe = unsafeField.get(null);
         Object atom = unsafe.getClass().getMethod("allocateInstance", Class.class)
-            .invoke(unsafe, Class.forName("azQ"));
-        Constructor<?> textSource = Class.forName("BYC").getDeclaredConstructors()[0];
+            .invoke(unsafe, Class.forName(current ? "TLG" : "azQ"));
+        Constructor<?> textSource = Class.forName(current ? "EwK" : "BYC").getDeclaredConstructors()[0];
         textSource.setAccessible(true);
 
-        Class<?> codeSource = Class.forName("com.bitwig.nitro.TJZ");
+        Class<?> codeSource = Class.forName(current ? "com.bitwig.nitro.vP2" : "com.bitwig.nitro.TJZ");
         Method compile = null;
-        for (Method method : Class.forName("com.bitwig.nitro.PI").getDeclaredMethods()) {
+        for (Method method : Class.forName(current ? "com.bitwig.nitro.tIb" : "com.bitwig.nitro.PI").getDeclaredMethods()) {
             Class<?>[] types = method.getParameterTypes();
             if (Modifier.isStatic(method.getModifiers()) && types.length == 8
                     && types[0] == String.class && types[1] == codeSource) {
                 compile = method;
+                break;
             }
         }
         if (compile == null) {
@@ -61,8 +71,9 @@ public class NitroSemanticProbe {
         String llvmOutput = System.getProperty("nitro.llvm.output");
         Field llvmText = null;
         if (llvmOutput != null) {
-            // Exact Windows 6.1.3 compiler result field holding emitted LLVM text.
-            llvmText = Class.forName("com.bitwig.nitro.O2W").getDeclaredField("HEY");
+            // Compiler result field holding emitted LLVM text in each pinned build.
+            llvmText = current ? Class.forName("com.bitwig.nitro.tM1").getDeclaredField("sCA")
+                : Class.forName("com.bitwig.nitro.O2W").getDeclaredField("HEY");
             llvmText.setAccessible(true);
         }
         for (int index = 0; index < args.length; index++) {

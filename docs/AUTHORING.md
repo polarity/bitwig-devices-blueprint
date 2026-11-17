@@ -83,5 +83,38 @@ The limits below come from the 6.1.x Windows device work and the bundled
 Keep one Nitro core where possible. A cold multi-core compiler failure can
 pass a warm retest, so test larger graphs in a fresh process. Devices with
 runtime arrays need explicit initialization or write-before-read guarantees.
-Instruments, Note FX, modulators and Grid modules have different routing and
-state contracts. This demo supplies one Audio FX reference.
+## Other device types
+
+Blueprint Gain is the Audio FX example. Choose a gate based on the routing
+and state model of the device you are building.
+
+| Surface | Relevant checks |
+| --- | --- |
+| Note FX or instrument | Use the matching profile in `scripts/device_preflight.py`. Verify native note routing, event port types and root scheduling. Event instruments must route both their stereo output and voice lifetime signal correctly. |
+| Modulator | Use `scripts/modulator_preflight.py`. Check the 17 × 17 main panel, mapping-button bounds, scheduled components and the actual mapping behavior in Bitwig. |
+| Container or Grid module | Select `source-document` in the manifest and use `scripts/modulator_preflight.py`. Use the more specific device profile when its graph constraints apply. |
+
+Invoke the source-document gate with the workspace, `--compiler-inputs` for
+the exact target and `--report <file>` to retain its JSON results. Add
+`--project-file <overlay>` when the build uses a target overlay.
+
+Checks added after the first blueprint cover issues found in newer devices:
+
+- In a reactive panel expression, an indexed parameter such as `GRID` is an
+  integer. Read `GRID` directly. Ramona actions receive a parameter reference
+  and can use `GRID.value`. `PANEL021` catches the reactive expression error.
+- A Grid stereo audio jack on the tested 6.1.7 target carries four stereo
+  frames per engine frame. Declare `f32<2>[4]` with descriptor width 8 and
+  write all eight samples on every path, including idle. The Grid gate
+  checks the compiled AST, persisted port descriptors, jack connections and
+  acyclic routing. A workspace can also run its own DSP regression tests
+  against emitted LLVM via `preflight.dspTest`.
+- Give each independent meter or history tile its intended feed. Check each
+  lane with a distinctive input. The shared lint includes targeted checks
+  for duplicated feeds in Sonogram and Vectorscope documents.
+- Keep Grid Inspector controls inside a fixed panel at most 39 grid units
+  wide on this target. Give titled toggles visible text or an actual icon,
+  and keep module sort order in the accepted range of −9 to 9.
+  For live help, package the matching title and description keys under
+  `resources/<module filename without extension>/resources.properties`
+  beside the module.

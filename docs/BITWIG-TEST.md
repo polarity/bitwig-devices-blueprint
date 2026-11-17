@@ -1,22 +1,22 @@
 # Load and test with Patchbay
 
-Use the Windows x64 Bitwig 6.1.3 installation from the offline build. Start
-with a disposable project and the exact artifact checked in
+Use the same Bitwig version and platform as the offline build. Start with a
+disposable project and the exact artifact checked in
 [Build and preflight](BUILD.md#run-the-gate-and-build).
 
 ## Register the file
 
-1. Install the Windows Patchbay release using its bundled `INSTALL.md`. The
-   linked release lists support for 6.1.3.
-   [Patchbay Mod Loader 0.36.0-dev.14](https://github.com/shaboogen-dev/Patchbay/releases/tag/0.36.0-dev.14)
+1. Choose a Patchbay release that lists support for your Bitwig build and
+   follow its bundled `INSTALL.md`. [Patchbay releases](https://github.com/shaboogen-dev/Patchbay/releases)
 2. Close Bitwig. Put just the verified `Blueprint Gain.bwdevice` in a dedicated
    test folder outside the Bitwig installation. Compare its SHA-256 against
    the preflight report after copying it.
-3. Open Patchbay using `bml-ui.cmd`, select the intended 6.1.3 installation and
-   enable **Framework: Nitro Devices**. Older releases call it **Framework:
+3. Open Patchbay using the launcher for your OS and select the matching
+   installation. Enable **Framework: Nitro Devices**. Older releases call it **Framework:
    Custom Nitro Registration**. In **Tools → Device Folders**, add the test
    folder. The scanner recurses, so keep one file per UUID and device name
-   across all listed folders.
+   across all listed folders. The 6.1.3 and 6.1.7 builds share a UUID. Scan
+   only the matching version folder and remove the old one when switching.
 4. Click **Load** and search for **Blueprint Gain** in Bitwig's device browser.
    Confirm insertion and close the browser so the device is committed to the
    track. After replacing the file, relaunch Bitwig through Patchbay.
@@ -44,6 +44,12 @@ relaunch through Patchbay. Keep the matching artifact outside scanned folders
 if you want to reopen the disposable test project later.
 
 ## Current evidence
+
+Windows x64 6.1.7 passed the offline gate with zero findings, including the
+6.1.7 semantic probe and LLVM verification. Its built artifact matched the
+report SHA-256 `85127a64ec21bf725ab971024266cf9207e046e2dd512c0fa0e64f292ce85684`.
+The pinned 6.1.7 Nitro reader also accepted the embedded payload offline.
+Live tests for that build and revalidation of the Linux target are pending.
 
 Live-tested on 2026-11-14 with Bitwig Studio 6.1.3 Windows x64
 (revision `c41d0b6a6b042d5e6705b382ff28a6fc9bcd1671`), Patchbay
@@ -77,4 +83,4 @@ and the GUI and both audio channels passed the recall checks above.
 The temporary scan folder was removed from Patchbay by restoring its
 configuration byte-for-byte after shutdown. The disposable project,
 exports and screenshots remain under ignored `local/live-test/`.
-The newer Patchbay release linked above and a second UI scale remain untested.
+A second UI scale remains untested.

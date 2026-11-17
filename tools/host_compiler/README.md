@@ -11,10 +11,10 @@ Bitwig JARs named by a target profile. Those installed JARs are local licensed
 inputs and are never copied into this repository.
 
 `NitroSemanticProbe.java` is the repository-authored preflight helper that runs
-the pinned Windows Bitwig 6.1.3 Nitro front end, including semantic analysis,
+the pinned Windows Bitwig 6.1.3 or 6.1.7 Nitro front end, including semantic analysis,
 on plain-text sources. Preflight compiles it into a temporary directory and
 analyses every declared source serially, because a cold parallel analysis can
-fail with `Recursion in semantic analysis`. On the hash-pinned Windows 6.1.3
+fail with `Recursion in semantic analysis`. On either pinned Windows
 profile, the optional JVM property `nitro.llvm.output` directs the probe to
 write one numbered LLVM IR file per successful source to the temporary
 directory. Python preflight parses and verifies the files before removing

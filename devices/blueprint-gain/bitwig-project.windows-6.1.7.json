@@ -1,0 +1,8 @@
+{
+  "extends": "bitwig-project.json",
+  "target": {"bitwigVersion": "6.1.7", "platform": "windows-x86_64"},
+  "output": {
+    "path": "build/windows-6.1.7/Blueprint Gain.bwdevice",
+    "libraryPath": "Blueprint Gain.bwdevice"
+  }
+}

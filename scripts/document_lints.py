@@ -9,6 +9,7 @@ repository document codec; they compile nothing and prove no host behavior.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import prod
 import re
 from typing import Any, Iterable
 
@@ -24,6 +25,7 @@ MAX_DOCUMENT_VERSION = {
 }
 MODULATOR_TYPE = "application/bitwig-modulator"
 MODULATOR_PANEL_SIZE = 17  # grid units; a taller main panel is clipped by the slot
+GRID_INSPECTOR_WIDTH = 39  # native Windows 6.1.7 ADSR inspector
 MAPPING_MIN_COLUMNS = 5    # the native mapping arrow has a fixed size
 MAPPING_MIN_ROWS = 3
 TOGGLE_ICON_MAX_PX = 9     # a native toggle face is lower than a three-row cell
@@ -41,6 +43,8 @@ TOGGLE_ITEM_CLASS = 1702
 IMAGE_ITEM_CLASS = 1719
 MAPPING_ITEM_CLASS = 1717
 TEXT_FIELD_ITEM_CLASS = 1762
+INDEXED_ATOM_CLASS = 180
+PANEL_EXPRESSION_CLASS = 1728
 
 
 @dataclass(frozen=True)
@@ -125,6 +129,19 @@ def lint_document_version(document: dict[str, Any]) -> list[Lint]:
                  f"accepts for {kind}; inserting the file fails with InvalidDocumentVersionException.")]
 
 
+def lint_grid_sort_order(document: dict[str, Any]) -> list[Lint]:
+    body = document.get("body")
+    if not isinstance(body, dict) or body.get("class_id") != 1904:
+        return []
+    field = _field(body, "#10243")
+    if field is None:
+        return []
+    order = field.get("value")
+    if type(order) is int and -9 <= order <= 9:
+        return []
+    return [Lint("error", "DOC004", f"Grid module sort_order is {order!r}. Bitwig 6.1.7 accepts -9 through 9.")]
+
+
 def lint_scheduling(document: dict[str, Any]) -> list[Lint]:
     """Every graph component must be registered in the root child list.
 
@@ -137,10 +154,16 @@ def lint_scheduling(document: dict[str, Any]) -> list[Lint]:
         return []
     objects = list(owned_objects(body))
     ids = {id(item): index for index, item in enumerate(objects, 1)}
-    scheduled = {id(item) for item in _list(body, "child_components#173", objects)}
+    children = _list(body, "child_components#173", objects)
+    scheduled = {id(item) for item in children}
     for suffix in ("proxy_in_ports#177", "proxy_out_ports#178"):
         scheduled.update(id(item) for item in _list(body, suffix, objects))
-    findings = []
+    findings = [
+        Lint("error", "GRAPH008",
+             f"Root child_components points to {_describe(item, ids)}, which has no component settings.")
+        for item in children
+        if _field(item, "settings#6194") is None
+    ]
     for item in objects:
         if item is body or item.get("class_id") == PROXY_PORT_CLASS or id(item) in scheduled:
             continue
@@ -329,12 +352,207 @@ def lint_modulator_panel(document: dict[str, Any]) -> list[Lint]:
     return findings
 
 
+def lint_clickable_containers(document: dict[str, Any]) -> list[Lint]:
+    """Native clickable stacks derive their minimum hit area from children."""
+    objects = list(owned_objects(document.get("body", {})))
+    ids = {id(item): index for index, item in enumerate(objects, 1)}
+    return [
+        Lint("error", "PANEL020", f"{_describe(item, ids)} has an action but no child to size its hit area.")
+        for item in objects
+        if item.get("class_id") == 3405
+        and any(_value(item, field) for field in ("#10185", "#10186"))
+        and not _list(item, "#6221", objects)
+    ]
+
+
+def lint_indexed_panel_expressions(document: dict[str, Any]) -> list[Lint]:
+    """Panel expressions bind indexed atom identifiers as integers."""
+    objects = list(owned_objects(document.get("body", {})))
+    indexed = set()
+    for item in objects:
+        if item.get("class_id") == INDEXED_ATOM_CLASS:
+            name = _value(item, "#701")
+            if isinstance(name, str):
+                indexed.add(name)
+
+    findings = []
+    member = re.compile(r'"(?:[^"\\]|\\.)*"|(?<![\w.])([A-Za-z_]\w*)\s*\.\s*value\b')
+    for item in objects:
+        if item.get("class_id") != PANEL_EXPRESSION_CLASS:
+            continue
+        source = _value(item, "#6274")
+        if not isinstance(source, str):
+            continue
+        names = {match.group(1) for match in member.finditer(source)}
+        for name in sorted(names & indexed):
+            findings.append(Lint("error", "PANEL021",
+                                 f"Panel expression reads {name}.value. Read {name} directly."))
+    return findings
+
+
+def lint_grid_toggle_labels(document: dict[str, Any]) -> list[Lint]:
+    """An icon-only Grid toggle needs an icon to show its purpose."""
+    if _document_type(document) != "application/bitwig-module":
+        return []
+    return [
+        Lint("error", "PANEL022", f"Grid toggle {_value(item, '#6241')!r} is icon-only and has no icon.")
+        for item in owned_objects(document.get("body", {}))
+        if item.get("class_id") == TOGGLE_ITEM_CLASS
+        and _value(item, "#6309", True)
+        and _value(item, "#6241")
+        and _value(item, "#6267") == 1
+        and not _value(item, "#6239")
+    ]
+
+
+def lint_grid_inspector_width(document: dict[str, Any]) -> list[Lint]:
+    """Keep custom Inspector content within Bitwig's native sidebar width."""
+    if _document_type(document) != "application/bitwig-module":
+        return []
+    body = document.get("body", {})
+    objects = list(owned_objects(body))
+    inspector = _resolve(_field(body, "#9820"), objects)
+    if inspector is None:
+        return []
+
+    def content_width(item):
+        layout = _resolve(_field(item, "#6226"), objects) or {}
+        width = _value(layout, "#6217", 0)
+        children = _list(item, "#6221", objects)
+        if item.get("class_id") == 1679 and _value(item, "#6209", False):
+            gap = max(0, len(children) - 1) if _value(item, "#9821", False) else 0
+            return max(width, sum(content_width(child) for child in children) + gap)
+        extent = max((content_width(child) for child in children), default=0)
+        return _value(layout, "#6215", 0) + max(width, extent)
+
+    width = _value(inspector, "#6232", 0)
+    if not 1 <= width <= GRID_INSPECTOR_WIDTH or _value(inspector, "#10404", False):
+        return [Lint("error", "PANEL025", f"Grid Inspector must have a fixed width of at most {GRID_INSPECTOR_WIDTH} units.")]
+    root = _resolve(_field(inspector, "#6212"), objects)
+    if root is not None and content_width(root) > width:
+        return [Lint("error", "PANEL025", f"Grid Inspector content exceeds its declared {width}-unit width.")]
+    return []
+
+
+def lint_sonogram_tile_feeds(document: dict[str, Any]) -> list[Lint]:
+    """Give each Sonogram tile a fixed scalar feed from its frequency bank."""
+    body = document.get("body", {})
+    if (_document_type(document) != "application/bitwig-module"
+            or _value(body, "#6369") != "39e52c1c-4642-4f1e-9bc5-83b036beb1c1"):
+        return []
+    objects = list(owned_objects(body))
+
+    def feed(component, count):
+        links = _connections(component, objects)
+        if len(links) < count:
+            return None, None
+        link = links[0]
+        return _resolve(_field(link, "#248"), objects), _value(link, "#249")
+
+    tiles = [item for item in objects if item.get("class_id") == DRAWING_CLASS]
+    revision = _value(body, "#13647", 1)
+    paired = revision == 8
+    if revision >= 12:
+        tile_count, sections = 8, 2
+    elif revision >= 10:
+        tile_count, sections = 12, 4
+    else:
+        tile_count, sections = (8, 3) if revision >= 8 else (6, 2 if revision >= 3 else 1)
+    expected = {f"SONOGRAM_TILE_{index}": index for index in range(tile_count * sections)}
+    names = [_value(tile, "#701") for tile in tiles]
+    if len(names) != len(expected) or set(names) != expected.keys():
+        return [Lint("error", "PANEL023", "Sonogram must have each frequency and time tile exactly once.")]
+    for name, tile in zip(names, tiles):
+        section, frequency = divmod(expected[name], tile_count)
+        bank, lane = divmod(frequency, tile_count // 2)
+        pair, port = divmod(lane, 2) if paired else (0, lane)
+        output_count = 2 if paired else 3
+        if revision >= 10:
+            pair, port = divmod(lane, 2)
+            output_count = 2
+        elif revision == 9 and lane == 3:
+            port, output_count = 0, 1
+        history, _ = feed(tile, 3)
+        history_inputs = _connections(history, objects) if history else []
+        splitter, scalar_port = feed(history, 1) if history else (None, None)
+        splitter_inputs = _connections(splitter, objects) if splitter else []
+        analyzer, bank_port = feed(splitter, 1) if splitter else (None, None)
+        if revision >= 10:
+            vector_split = analyzer
+            if (bank_port != pair or vector_split is None
+                    or len(_list(vector_split, "#15757", objects)) != tile_count // 4):
+                return [Lint("error", "PANEL023", f"{name} must read the matching packed pair of its frequency bank.")]
+            analyzer, bank_port = feed(vector_split, 1)
+        for _ in range(section):
+            analyzer, bank_port = feed(analyzer, 1) if analyzer and bank_port == 0 else (None, None)
+        if paired:
+            if (len(splitter_inputs) != 2 or (_field(splitter_inputs[1], "#248") or {}).get("type") != "NullObject"
+                    or _value(splitter_inputs[1], "#6443") != pair):
+                return [Lint("error", "PANEL023", f"{name} must read the matching pair of its frequency bank.")]
+        outputs = _list(splitter, "#15757", objects) if splitter else []
+        if (len(history_inputs) != 1 or scalar_port != port or bank_port != 1 + bank
+                or analyzer is None or len(outputs) != output_count or len(splitter_inputs) != (2 if paired else 1)
+                or _value(outputs[port], "#8559") != 1):
+            return [Lint("error", "PANEL023", f"{name} must read its dedicated scalar splitter output.")]
+    return []
+
+
+def lint_vectorscope_tile_feeds(document: dict[str, Any]) -> list[Lint]:
+    """Keep phosphor tile identities on distinct connected outputs."""
+    body = document.get("body", {})
+    if (_document_type(document) != "application/bitwig-module"
+            or _value(body, "#6369") != "6e988a57-2a23-4283-b1a8-39768b391545"
+            or _value(body, "#13647", 1) < 4):
+        return []
+    objects = list(owned_objects(body))
+    revision = _value(body, "#13647", 1)
+    if revision >= 10:
+        arities = ()
+    elif revision >= 8:
+        arities = (2,) * 6
+    else:
+        arities = (3, 3, 2, 2) if revision >= 6 else (2,) * (4 if revision == 5 else 2)
+    expected = {f"VECTORSCOPE_PHOSPHOR_{tile}": tile for tile in range(prod(arities))}
+    tiles = [(name, item) for item in objects if item.get("class_id") == DRAWING_CLASS
+             if (name := _value(item, "#701") or "").startswith("VECTORSCOPE_PHOSPHOR_")]
+    if len(tiles) != len(expected) or {name for name, _ in tiles} != expected.keys():
+        return [Lint("error", "PANEL024", f"Vectorscope must contain all {len(expected)} phosphor drawings.")]
+
+    def feed(component, *, drawing=False):
+        links = _connections(component, objects) if component else []
+        if len(links) != (9 if drawing else 1):
+            return None, None
+        return _resolve(_field(links[0], "#248"), objects), _value(links[0], "#249")
+
+    roots = set()
+    for name, drawing in tiles:
+        root_split, _ = feed(drawing, drawing=True)
+        address = expected[name]
+        for arity in reversed(arities):
+            address, expected_port = divmod(address, arity)
+            root_split, port = feed(root_split)
+            if root_split is None or port != expected_port:
+                return [Lint("error", "PANEL024", f"{name} must use its own routed tile signal.")]
+        feeder, port = feed(root_split)
+        if feeder is None or port != 2:
+            return [Lint("error", "PANEL024", f"{name} must use the motion blur input feed.")]
+        roots.add(id(root_split))
+    return [] if len(roots) == 1 else [Lint("error", "PANEL024", "Vectorscope tiles must share one routing root.")]
+
+
 def lint_document(document: dict[str, Any]) -> list[Lint]:
     """Run every document lint; order is stable for reports."""
     return [
         *lint_document_version(document),
+        *lint_grid_sort_order(document),
         *lint_scheduling(document),
         *lint_connection_widths(document),
         *lint_chain_delay_sources(document),
         *lint_modulator_panel(document),
+        *lint_clickable_containers(document),
+        *lint_indexed_panel_expressions(document),
+        *lint_grid_toggle_labels(document),
+        *lint_grid_inspector_width(document),
+        *lint_sonogram_tile_feeds(document),
+        *lint_vectorscope_tile_feeds(document),
     ]

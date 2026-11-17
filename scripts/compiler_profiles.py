@@ -25,6 +25,14 @@ PROFILES = {
         "libsSha256": "e9229581eff455e58e260c55903095f41bd7c723608f9f39d1cc623e75ab9cfc",
         "bridgeSha256": "7f7c70e203a80f1f3bc2cdb725e80a4f01b3e98f2a87b56a124611fc56832be3",
     },
+    "windows-x86_64-bitwig-6.1.7": {
+        "version": "6.1.7",
+        "platform": "windows-x86_64",
+        "jarSha256": "a5b303466cf66a80e0fd7df00e49fb14eb41c23e59d30b300c0554b6769b3367",
+        "libsSha256": "f7b857c77ac67607daa8b02b502f51229c186a0a1c870e1f857bb331ceb23885",
+        "bridgeSha256": "7f7c70e203a80f1f3bc2cdb725e80a4f01b3e98f2a87b56a124611fc56832be3",
+        "astCompression": "raw-deflate",
+    },
     "macos-arm64-bitwig-6.1.3": {
         "version": "6.1.3",
         "platform": "macos-arm64",
@@ -32,13 +40,21 @@ PROFILES = {
         "libsSha256": "8df006f8a6574b8eceee5bd355eb087fb66c430dc9b7202deedbae17df9af222",
         "bridgeSha256": "7f7c70e203a80f1f3bc2cdb725e80a4f01b3e98f2a87b56a124611fc56832be3",
     },
+    "macos-arm64-bitwig-6.1.7": {
+        "version": "6.1.7",
+        "platform": "macos-arm64",
+        "jarSha256": "6024752847797eb41e6fbc91e081211937931cc452a695ab78226321cefdac8d",
+        "libsSha256": "f00d33c0b8d74025b02e5268ad61c055c8dbda96b4bb43fd40b605b853576c68",
+        "bridgeSha256": "7f7c70e203a80f1f3bc2cdb725e80a4f01b3e98f2a87b56a124611fc56832be3",
+        "astCompression": "raw-deflate",
+    },
     "linux-x86_64-bitwig-6.1.7": {
         "version": "6.1.7",
         "platform": "linux-x86_64",
         "jarSha256": "a3e52ddc94cfe69e08f75a96b2ee43b04a932d804948fa09c013ea7a04a43c44",
         "libsSha256": "72a94668b2c1739c1b1c0a7bfaba56f4f1f78efaf0da4bb08fd9030bcde5081c",
         "bridgeSha256": "4134383e2a0365af431ea97fc82371e979067b63c2ad6812a1439a076cc6fbeb",
-        "deflatedAst": True,
+        "astCompression": "raw-deflate",
     },
 }
 
@@ -89,6 +105,19 @@ def require_target(profile: dict, target: dict) -> None:
     if (target.get("bitwigVersion"), target.get("platform")) != (profile["version"], profile["platform"]):
         raise ValueError("Compiler profile does not match workspace target version and platform")
 
+def unpack_ast(binary: bytes, profile: dict) -> bytes:
+    """Return the AST bytes for offline analysis, preserving compiler output on disk."""
+    if profile.get("astCompression") != "raw-deflate":
+        return binary
+    inflater = zlib.decompressobj(-zlib.MAX_WBITS)
+    try:
+        ast = inflater.decompress(binary) + inflater.flush()
+    except zlib.error as exc:
+        raise ValueError("Compiled Nitro AST is not a raw DEFLATE stream") from exc
+    if not inflater.eof or inflater.unused_data:
+        raise ValueError("Compiled Nitro AST must be a single complete raw DEFLATE stream")
+    return ast
+
 def compile_source(source: Path, output: Path, inputs_path: Path) -> dict:
     inputs, profile = validate_inputs(inputs_path)
     source_sha = digest(source)
@@ -103,8 +132,8 @@ def compile_source(source: Path, output: Path, inputs_path: Path) -> dict:
     binary = output.read_bytes()
     try:
         from bitwig_nitro import decompile_nitrobin, serialize_nitrobin
-        ast_bytes = zlib.decompress(binary, -15) if profile.get("deflatedAst") else binary
-        stable = bool(ast_bytes) and serialize_nitrobin(decompile_nitrobin(ast_bytes)) == ast_bytes
+        ast = unpack_ast(binary, profile)
+        stable = bool(ast) and serialize_nitrobin(decompile_nitrobin(ast)) == ast
     except Exception:
         output.unlink(missing_ok=True)
         raise

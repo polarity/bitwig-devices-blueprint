@@ -25,6 +25,34 @@ import os
 import sys
 from pathlib import Path
 
+
+def help_resource_path(artifact: Path) -> Path:
+    return artifact.parent / "resources" / artifact.stem / "resources.properties"
+
+
+def write_help_resource(artifact: Path, stage: Path, source: Path) -> None:
+    target = help_resource_path(artifact)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staged = stage / target.name
+    staged.write_bytes(source.read_bytes())
+    os.replace(staged, target)
+
+
+def help_strings(source: Path) -> dict[str, str]:
+    """Read the repository's literal English help keys and descriptions."""
+    entries = {}
+    for line in source.read_text(encoding="ascii").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        key, equals, value = stripped.partition("=")
+        key, value = key.strip(), value.strip()
+        if not equals or not key or not value or key in entries:
+            raise ValueError(f"{source}: invalid or duplicate help entry {key!r}")
+        entries[key] = value
+    return entries
+
+
 MANIFEST = "bitwig-project.json"
 # Platform -> overlay file name. A platform that is not listed uses the manifest.
 PLATFORM_CONTRACTS = {

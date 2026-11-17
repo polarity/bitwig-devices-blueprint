@@ -1,7 +1,8 @@
 # Agent guide
 
-Use [README.md](README.md) as the documentation index. The demo is the reference
-for an original Windows x64 Bitwig Studio 6.1.3 Audio FX.
+Use [README.md](README.md) as the documentation index. The demo is the
+reference for an original Audio FX. Use the build guide to select its exact
+Bitwig version and platform.
 
 | Task | Start here |
 | --- | --- |
